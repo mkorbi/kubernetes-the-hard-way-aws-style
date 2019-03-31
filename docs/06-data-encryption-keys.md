@@ -36,8 +36,14 @@ Copy the `encryption-config.yaml` encryption config file to each controller inst
 
 ```
 for instance in controller-0 controller-1 controller-2; do
-  gcloud compute scp encryption-config.yaml ${instance}:~/
+  external_ip=$(aws ec2 describe-instances \
+    --filters "Name=tag:Name,Values=${instance}" \
+    --output text --query 'Reservations[].Instances[].PublicIpAddress')
+  
+  scp -i K8sKeys.pem encryption-config.yaml ubuntu@${external_ip}:~/
 done
 ```
+
+
 
 Next: [Bootstrapping the etcd Cluster](07-bootstrapping-etcd.md)

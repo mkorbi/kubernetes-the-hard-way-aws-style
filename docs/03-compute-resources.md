@@ -1,8 +1,8 @@
 # Provisioning Compute Resources
 
-Kubernetes requires a set of machines to host the Kubernetes control plane and the worker nodes where containers are ultimately run. In this lab you will provision the compute resources required for running a secure and highly available Kubernetes cluster across a single [compute zone](https://cloud.google.com/compute/docs/regions-zones/regions-zones).
+Kubernetes requires a set of machines to host the Kubernetes control plane and the worker nodes where containers are ultimately run. In this lab you will provision the compute resources required for running a secure and highly available Kubernetes cluster across a single region.
 
-> Ensure a default compute zone and region have been set as described in the [Prerequisites](01-prerequisites.md#set-a-default-compute-region-and-zone) lab.
+> Ensure a default region has been set as described in the [Prerequisites](01-prerequisites.md#set-a-default-compute-region-and-zone) lab.
 
 ## Networking
 
@@ -10,109 +10,138 @@ The Kubernetes [networking model](https://kubernetes.io/docs/concepts/cluster-ad
 
 > Setting up network policies is out of scope for this tutorial.
 
-### Virtual Private Cloud Network
+### Virtual Private Cloud Network - VPC
 
-In this section a dedicated [Virtual Private Cloud](https://cloud.google.com/compute/docs/networks-and-firewalls#networks) (VPC) network will be setup to host the Kubernetes cluster.
+In this section a dedicated [Virtual Private Cloud](https://aws.amazon.com/vpc/) (VPC) network will be setup to host the Kubernetes cluster.
 
-Create the `kubernetes-the-hard-way` custom VPC network:
-
-```
-gcloud compute networks create kubernetes-the-hard-way --subnet-mode custom
-```
-
-A [subnet](https://cloud.google.com/compute/docs/vpc/#vpc_networks_and_subnets) must be provisioned with an IP address range large enough to assign a private IP address to each node in the Kubernetes cluster.
-
-Create the `kubernetes` subnet in the `kubernetes-the-hard-way` VPC network:
+Create the VPC network:
 
 ```
-gcloud compute networks subnets create kubernetes \
-  --network kubernetes-the-hard-way \
-  --range 10.240.0.0/24
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.240.0.0/24 --output text --query 'Vpc.VpcId')
+aws ec2 create-tags --resources ${VPC_ID} --tags Key=Name,Value=kubernetes-the-hard-way
+aws ec2 modify-vpc-attribute --vpc-id ${VPC_ID} --enable-dns-support '{"Value": true}'
+aws ec2 modify-vpc-attribute --vpc-id ${VPC_ID} --enable-dns-hostnames '{"Value": true}'
+```
+Remember the VPC ID which you get as output from the command above. The VPC ID starts with "vpc-" and some alphanumeric characters.
+
+Beside the VPC we need to create a subnet.
+```
+SUBNET_ID=$(aws ec2 create-subnet \
+  --vpc-id ${VPC_ID} \
+  --cidr-block 10.240.0.0/24 \
+  --output text --query 'Subnet.SubnetId')
+aws ec2 create-tags --resources ${SUBNET_ID} --tags Key=Name,Value=k8s
 ```
 
-> The `10.240.0.0/24` IP address range can host up to 254 compute instances.
-
-### Firewall Rules
-
-Create a firewall rule that allows internal communication across all protocols:
-
+### Internet Gateway
+Next, make your VPC accessable from the internet. For this you need to create a Internet Gateway, which you then attach to your VPC.
 ```
-gcloud compute firewall-rules create kubernetes-the-hard-way-allow-internal \
-  --allow tcp,udp,icmp \
-  --network kubernetes-the-hard-way \
-  --source-ranges 10.240.0.0/24,10.200.0.0/16
+INTERNET_GATEWAY_ID=$(aws ec2 create-internet-gateway --output text --query 'InternetGateway.InternetGatewayId')
+aws ec2 create-tags --resources ${INTERNET_GATEWAY_ID} --tags Key=Name,Value=k8s
+```
+And attach the internet gateway to your VPC
+```
+aws ec2 attach-internet-gateway --vpc-id ${VPC_ID}--internet-gateway-id ${INTERNET_GATEWAY_ID}
 ```
 
-Create a firewall rule that allows external SSH, ICMP, and HTTPS:
+### Security Groups
+To protect your instances and network at least a little, we will create a Security Group (sg).
+
+SECURITY_GROUP_ID=$(aws ec2 create-security-group \
+  --group-name k8s \
+  --description "Kubernetes security group" \
+  --vpc-id ${VPC_ID} \
+  --output text --query 'GroupId')
+aws ec2 create-tags --resources ${SECURITY_GROUP_ID} --tags Key=Name,Value=k8s
+aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --protocol all --cidr 10.240.0.0/24
+aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --protocol all --cidr 10.200.0.0/16
+aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --protocol tcp --port 22 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --protocol tcp --port 6443 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --protocol tcp --port 443 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --protocol icmp --port -1 --cidr 0.0.0.0/0
+
+### Route Tables
+
+Create a route tables that allows outbound communication across all protocols:
+```
+ROUTE_TABLE_ID=$(aws ec2 create-route-table --vpc-id ${VPC_ID} --output text --query 'RouteTable.RouteTableId')
+aws ec2 create-route --route-table-id <your-rtb-id> --destination-cidr-block 0.0.0.0/0 --gateway-id <your-igw-id>
+aws ec2 create-tags --resources ${ROUTE_TABLE_ID} --tags Key=Name,Value=kubernetes
+```
+To make this working we need now to get our subnets and attach them to the route table. Also we will allow all outbound traffic.
+```
+aws ec2 associate-route-table --route-table-id ${ROUTE_TABLE_ID} --subnet-id ${SUBNET_ID}
+aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID} --destination-cidr-block 0.0.0.0/0 --gateway-id ${INTERNET_GATEWAY_ID}
 
 ```
-gcloud compute firewall-rules create kubernetes-the-hard-way-allow-external \
-  --allow tcp:22,tcp:6443,icmp \
-  --network kubernetes-the-hard-way \
-  --source-ranges 0.0.0.0/0
+
+### Load Balancing
+To give a reliable endpoint for the K8s API we will run an eleastic load balancer (ELB).
 ```
+ LOAD_BALANCER_ARN=$(aws elbv2 create-load-balancer \
+    --name k8s \
+    --subnets ${SUBNET_ID} \
+    --scheme internet-facing \
+    --type network \
+    --output text --query 'LoadBalancers[].LoadBalancerArn')
 
-> An [external load balancer](https://cloud.google.com/compute/docs/load-balancing/network/) will be used to expose the Kubernetes API Servers to remote clients.
+  TARGET_GROUP_ARN=$(aws elbv2 create-target-group \
+    --name k8s \
+    --protocol TCP \
+    --port 6443 \
+    --vpc-id ${VPC_ID} \
+    --target-type ip \
+    --output text --query 'TargetGroups[].TargetGroupArn')
 
-List the firewall rules in the `kubernetes-the-hard-way` VPC network:
-
+  aws elbv2 register-targets --target-group-arn ${TARGET_GROUP_ARN} --targets Id=10.240.0.1{0,1,2}
+  aws elbv2 create-listener \
+    --load-balancer-arn ${LOAD_BALANCER_ARN} \
+    --protocol TCP \
+    --port 443 \
+    --default-actions Type=forward,TargetGroupArn=${TARGET_GROUP_ARN} \
+    --output text --query 'Listeners[].ListenerArn'
 ```
-gcloud compute firewall-rules list --filter="network:kubernetes-the-hard-way"
-```
-
-> output
-
-```
-NAME                                    NETWORK                  DIRECTION  PRIORITY  ALLOW                 DENY
-kubernetes-the-hard-way-allow-external  kubernetes-the-hard-way  INGRESS    1000      tcp:22,tcp:6443,icmp
-kubernetes-the-hard-way-allow-internal  kubernetes-the-hard-way  INGRESS    1000      tcp,udp,icmp
-```
-
-### Kubernetes Public IP Address
-
-Allocate a static IP address that will be attached to the external load balancer fronting the Kubernetes API Servers:
-
-```
-gcloud compute addresses create kubernetes-the-hard-way \
-  --region $(gcloud config get-value compute/region)
-```
-
-Verify the `kubernetes-the-hard-way` static IP address was created in your default compute region:
-
-```
-gcloud compute addresses list --filter="name=('kubernetes-the-hard-way')"
-```
-
-> output
-
-```
-NAME                     REGION    ADDRESS        STATUS
-kubernetes-the-hard-way  us-west1  XX.XXX.XXX.XX  RESERVED
-```
-
 ## Compute Instances
 
 The compute instances in this lab will be provisioned using [Ubuntu Server](https://www.ubuntu.com/server) 18.04, which has good support for the [containerd container runtime](https://github.com/containerd/containerd). Each compute instance will be provisioned with a fixed private IP address to simplify the Kubernetes bootstrapping process.
 
+### Key Pair
+To be able to ssh later on to the EC2 machines we need a key pair and save this localy.
+
+```
+aws ec2 create-key-pair --key-name K8sKeys --query 'KeyMaterial' --output text > K8sKeys.pem
+chmod 400 K8sKeys.pem
+```
 ### Kubernetes Controllers
 
 Create three compute instances which will host the Kubernetes control plane:
+> The AMI ID depends on your region. You can find the right AMI at [ubuntu.com](https://cloud-images.ubuntu.com/locator/ec2/). We use here an AMI for eu-central-1 aka Frankfurt.
+
+```
+${IMAGE_ID}=ami-0d3d3732ee4ccceff
+```
+We will use here t2.micros, which is in the free tier inclueded. However there can be still some costs, so don't forget to tidy up later.
 
 ```
 for i in 0 1 2; do
-  gcloud compute instances create controller-${i} \
-    --async \
-    --boot-disk-size 200GB \
-    --can-ip-forward \
-    --image-family ubuntu-1804-lts \
-    --image-project ubuntu-os-cloud \
-    --machine-type n1-standard-1 \
-    --private-network-ip 10.240.0.1${i} \
-    --scopes compute-rw,storage-ro,service-management,service-control,logging-write,monitoring \
-    --subnet kubernetes \
-    --tags kubernetes-the-hard-way,controller
+  instance_id=$(aws ec2 run-instances \
+    --associate-public-ip-address \
+    --image-id ${IMAGE_ID} \
+    --count 1 \
+    --key-name K8sKeys \
+    --security-group-ids ${SECURITY_GROUP_ID} \
+    --instance-type t2.micro \
+    --private-ip-address 10.240.0.1${i} \
+    --user-data "name=controller-${i}" \
+    --subnet-id ${SUBNET_ID} \
+    --block-device-mappings='{"DeviceName": "/dev/sda1", "Ebs": { "VolumeSize": 20 }, "NoDevice": "" }' \
+    --output text --query 'Instances[].InstanceId')
+  aws ec2 modify-instance-attribute --instance-id ${instance_id} --no-source-dest-check
+  aws ec2 create-tags --resources ${instance_id} --tags "Key=Name,Value=controller-${i}"
+  echo "controller-${i} created "
 done
 ```
+
 
 ### Kubernetes Workers
 
@@ -124,18 +153,21 @@ Create three compute instances which will host the Kubernetes worker nodes:
 
 ```
 for i in 0 1 2; do
-  gcloud compute instances create worker-${i} \
-    --async \
-    --boot-disk-size 200GB \
-    --can-ip-forward \
-    --image-family ubuntu-1804-lts \
-    --image-project ubuntu-os-cloud \
-    --machine-type n1-standard-1 \
-    --metadata pod-cidr=10.200.${i}.0/24 \
-    --private-network-ip 10.240.0.2${i} \
-    --scopes compute-rw,storage-ro,service-management,service-control,logging-write,monitoring \
-    --subnet kubernetes \
-    --tags kubernetes-the-hard-way,worker
+  instance_id=$(aws ec2 run-instances \
+    --associate-public-ip-address \
+    --image-id ${IMAGE_ID} \
+    --count 1 \
+    --key-name k8s \
+    --security-group-ids ${SECURITY_GROUP_ID} \
+    --instance-type t2.micro \
+    --private-ip-address 10.240.0.2${i} \
+    --user-data "name=worker-${i}|pod-cidr=10.200.${i}.0/24" \
+    --subnet-id ${SUBNET_ID} \
+    --block-device-mappings='{"DeviceName": "/dev/sda1", "Ebs": { "VolumeSize": 20 }, "NoDevice": "" }' \
+    --output text --query 'Instances[].InstanceId')
+  aws ec2 modify-instance-attribute --instance-id ${instance_id} --no-source-dest-check
+  aws ec2 create-tags --resources ${instance_id} --tags "Key=Name,Value=worker-${i}"
+  echo "worker-${i} created"
 done
 ```
 
@@ -144,87 +176,17 @@ done
 List the compute instances in your default compute zone:
 
 ```
-gcloud compute instances list
+aws ec2 describe-instances --filters "Name=tag:Name,Values=worker-0,worker-1,worker-2,controller-0,controller-1,controller-2"
 ```
 
 > output
 
 ```
-NAME          ZONE        MACHINE_TYPE   PREEMPTIBLE  INTERNAL_IP  EXTERNAL_IP     STATUS
-controller-0  us-west1-c  n1-standard-1               10.240.0.10  XX.XXX.XXX.XXX  RUNNING
-controller-1  us-west1-c  n1-standard-1               10.240.0.11  XX.XXX.X.XX     RUNNING
-controller-2  us-west1-c  n1-standard-1               10.240.0.12  XX.XXX.XXX.XX   RUNNING
-worker-0      us-west1-c  n1-standard-1               10.240.0.20  XXX.XXX.XXX.XX  RUNNING
-worker-1      us-west1-c  n1-standard-1               10.240.0.21  XX.XXX.XX.XXX   RUNNING
-worker-2      us-west1-c  n1-standard-1               10.240.0.22  XXX.XXX.XX.XX   RUNNING
-```
-
-## Configuring SSH Access
-
-SSH will be used to configure the controller and worker instances. When connecting to compute instances for the first time SSH keys will be generated for you and stored in the project or instance metadata as describe in the [connecting to instances](https://cloud.google.com/compute/docs/instances/connecting-to-instance) documentation.
-
-Test SSH access to the `controller-0` compute instances:
 
 ```
-gcloud compute ssh controller-0
-```
 
-If this is your first time connecting to a compute instance SSH keys will be generated for you. Enter a passphrase at the prompt to continue:
 
-```
-WARNING: The public SSH key file for gcloud does not exist.
-WARNING: The private SSH key file for gcloud does not exist.
-WARNING: You do not have an SSH key for gcloud.
-WARNING: SSH keygen will be executed to generate a key.
-Generating public/private rsa key pair.
-Enter passphrase (empty for no passphrase):
-Enter same passphrase again:
-```
-
-At this point the generated SSH keys will be uploaded and stored in your project:
-
-```
-Your identification has been saved in /home/$USER/.ssh/google_compute_engine.
-Your public key has been saved in /home/$USER/.ssh/google_compute_engine.pub.
-The key fingerprint is:
-SHA256:nz1i8jHmgQuGt+WscqP5SeIaSy5wyIJeL71MuV+QruE $USER@$HOSTNAME
-The key's randomart image is:
-+---[RSA 2048]----+
-|                 |
-|                 |
-|                 |
-|        .        |
-|o.     oS        |
-|=... .o .o o     |
-|+.+ =+=.+.X o    |
-|.+ ==O*B.B = .   |
-| .+.=EB++ o      |
-+----[SHA256]-----+
-Updating project ssh metadata...-Updated [https://www.googleapis.com/compute/v1/projects/$PROJECT_ID].
-Updating project ssh metadata...done.
-Waiting for SSH key to propagate.
-```
-
-After the SSH keys have been updated you'll be logged into the `controller-0` instance:
-
-```
-Welcome to Ubuntu 18.04 LTS (GNU/Linux 4.15.0-1006-gcp x86_64)
-
-...
-
-Last login: Sun May 13 14:34:27 2018 from XX.XXX.XXX.XX
-```
-
-Type `exit` at the prompt to exit the `controller-0` compute instance:
-
-```
-$USER@controller-0:~$ exit
-```
-> output
-
-```
-logout
-Connection to XX.XXX.XXX.XXX closed
-```
+### Important Note
+The here designed VPC and network is just for an easy start with Kubernetes and doesn't realize the [Well Architected Framework](https://aws.amazon.com/architecture/well-architected/).  
 
 Next: [Provisioning a CA and Generating TLS Certificates](04-certificate-authority.md)

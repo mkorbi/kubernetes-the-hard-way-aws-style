@@ -7,49 +7,48 @@ In this lab you will delete the compute resources created during this tutorial.
 Delete the controller and worker compute instances:
 
 ```
-gcloud -q compute instances delete \
-  controller-0 controller-1 controller-2 \
-  worker-0 worker-1 worker-2
-```
+aws ec2 terminate-instances \
+  --instance-ids \
+    $(aws ec2 describe-instances \
+      --filter "Name=tag:Name,Values=controller-0,controller-1,controller-2,worker-0,worker-1,worker-2" \
+      --output text --query 'Reservations[].Instances[].InstanceId')
+aws ec2 delete-key-pair --key-name k8s
 
+```
 ## Networking
 
 Delete the external load balancer network resources:
 
 ```
-{
-  gcloud -q compute forwarding-rules delete kubernetes-forwarding-rule \
-    --region $(gcloud config get-value compute/region)
-
-  gcloud -q compute target-pools delete kubernetes-target-pool
-
-  gcloud -q compute http-health-checks delete kubernetes
-
-  gcloud -q compute addresses delete kubernetes-the-hard-way
-}
+aws elbv2 delete-load-balancer --load-balancer-arn "${LOAD_BALANCER_ARN}"
+aws elbv2 delete-target-group --target-group-arn "${TARGET_GROUP_ARN}"
 ```
 
-Delete the `kubernetes-the-hard-way` firewall rules:
+Delete the `kubernetes-the-hard-way` firewall rules aka security groups:
 
 ```
-gcloud -q compute firewall-rules delete \
-  kubernetes-the-hard-way-allow-nginx-service \
-  kubernetes-the-hard-way-allow-internal \
-  kubernetes-the-hard-way-allow-external \
-  kubernetes-the-hard-way-allow-health-check
+aws ec2 delete-security-group --group-id "${SECURITY_GROUP_ID}"
 ```
 
-Delete the `kubernetes-the-hard-way` network VPC:
+Delete the `kubernetes-the-hard-way` route tables and internet gateway:
+```
+ROUTE_TABLE_ASSOCIATION_ID="$(aws ec2 describe-route-tables \
+  --route-table-ids "${ROUTE_TABLE_ID}" \
+  --output text --query 'RouteTables[].Associations[].RouteTableAssociationId')"
+aws ec2 disassociate-route-table --association-id "${ROUTE_TABLE_ASSOCIATION_ID}"
+
+aws ec2 delete-route-table --route-table-id "${ROUTE_TABLE_ID}"
+
+aws ec2 detach-internet-gateway \
+  --internet-gateway-id "${INTERNET_GATEWAY_ID}" \
+  --vpc-id "${VPC_ID}"
+aws ec2 delete-internet-gateway --internet-gateway-id "${INTERNET_GATEWAY_ID}"
 
 ```
-{
-  gcloud -q compute routes delete \
-    kubernetes-route-10-200-0-0-24 \
-    kubernetes-route-10-200-1-0-24 \
-    kubernetes-route-10-200-2-0-24
 
-  gcloud -q compute networks subnets delete kubernetes
+Delete the `kubernetes-the-hard-way` subnets and finally the VPC:
 
-  gcloud -q compute networks delete kubernetes-the-hard-way
-}
+```
+aws ec2 delete-subnet --subnet-id "${SUBNET_ID}"
+aws ec2 delete-vpc --vpc-id "${VPC_ID}"
 ```

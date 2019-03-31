@@ -8,14 +8,26 @@ In this lab you will create a route for each worker node that maps the node's Po
 
 ## The Routing Table
 
-In this section you will gather the information required to create routes in the `kubernetes-the-hard-way` VPC network.
-
-Print the internal IP address and Pod CIDR range for each worker instance:
+Create network routes for each worker instance:
 
 ```
 for instance in worker-0 worker-1 worker-2; do
-  gcloud compute instances describe ${instance} \
-    --format 'value[separator=" "](networkInterfaces[0].networkIP,metadata.items[0].value)'
+  instance_id_ip="$(aws ec2 describe-instances \
+    --filters "Name=tag:Name,Values=${instance}" \
+    --output text --query 'Reservations[].Instances[].[InstanceId,PrivateIpAddress]')"
+  instance_id="$(echo "${instance_id_ip}" | cut -f1)"
+  instance_ip="$(echo "${instance_id_ip}" | cut -f2)"
+  pod_cidr="$(aws ec2 describe-instance-attribute \
+    --instance-id "${instance_id}" \
+    --attribute userData \
+    --output text --query 'UserData.Value' \
+    | base64 --decode | tr "|" "\n" | grep "^pod-cidr" | cut -d'=' -f2)"
+  echo "${instance_ip} ${pod_cidr}"
+
+  aws ec2 create-route \
+    --route-table-id "${ROUTE_TABLE_ID}" \
+    --destination-cidr-block "${pod_cidr}" \
+    --instance-id "${instance_id}"
 done
 ```
 
@@ -27,34 +39,5 @@ done
 10.240.0.22 10.200.2.0/24
 ```
 
-## Routes
-
-Create network routes for each worker instance:
-
-```
-for i in 0 1 2; do
-  gcloud compute routes create kubernetes-route-10-200-${i}-0-24 \
-    --network kubernetes-the-hard-way \
-    --next-hop-address 10.240.0.2${i} \
-    --destination-range 10.200.${i}.0/24
-done
-```
-
-List the routes in the `kubernetes-the-hard-way` VPC network:
-
-```
-gcloud compute routes list --filter "network: kubernetes-the-hard-way"
-```
-
-> output
-
-```
-NAME                            NETWORK                  DEST_RANGE     NEXT_HOP                  PRIORITY
-default-route-081879136902de56  kubernetes-the-hard-way  10.240.0.0/24  kubernetes-the-hard-way   1000
-default-route-55199a5aa126d7aa  kubernetes-the-hard-way  0.0.0.0/0      default-internet-gateway  1000
-kubernetes-route-10-200-0-0-24  kubernetes-the-hard-way  10.200.0.0/24  10.240.0.20               1000
-kubernetes-route-10-200-1-0-24  kubernetes-the-hard-way  10.200.1.0/24  10.240.0.21               1000
-kubernetes-route-10-200-2-0-24  kubernetes-the-hard-way  10.200.2.0/24  10.240.0.22               1000
-```
 
 Next: [Deploying the DNS Cluster Add-on](12-dns-addon.md)

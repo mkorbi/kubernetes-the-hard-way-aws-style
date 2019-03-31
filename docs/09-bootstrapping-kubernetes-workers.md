@@ -7,7 +7,16 @@ In this lab you will bootstrap three Kubernetes worker nodes. The following comp
 The commands in this lab must be run on each worker instance: `worker-0`, `worker-1`, and `worker-2`. Login to each worker instance using the `gcloud` command. Example:
 
 ```
-gcloud compute ssh worker-0
+for instance in worker-0 worker-1 worker-2; do
+  external_ip=$(aws ec2 describe-instances \
+    --filters "Name=tag:Name,Values=${instance}" \
+    --output text --query 'Reservations[].Instances[].PublicIpAddress')
+  
+  echo $external_ip
+done
+
+ssh -i K8sKeys.pem ubuntu@$external_ip
+
 ```
 
 ### Running commands in parallel with tmux
@@ -72,8 +81,9 @@ Install the worker binaries:
 Retrieve the Pod CIDR range for the current compute instance:
 
 ```
-POD_CIDR=$(curl -s -H "Metadata-Flavor: Google" \
-  http://metadata.google.internal/computeMetadata/v1/instance/attributes/pod-cidr)
+POD_CIDR=$(curl -s http://169.254.169.254/latest/user-data/ \
+  | tr "|" "\n" | grep "^pod-cidr" | cut -d"=" -f2)
+echo "${POD_CIDR}"
 ```
 
 Create the `bridge` network configuration file:
@@ -168,9 +178,12 @@ EOF
 ### Configure the Kubelet
 
 ```
+WORKERNAME=$(curl -s http://169.254.169.254/latest/user-data/ \
+| tr "|" "\n" | grep "^name" | cut -d"=" -f2)
+echo "${WORKER_NAME}"
 {
-  sudo mv ${HOSTNAME}-key.pem ${HOSTNAME}.pem /var/lib/kubelet/
-  sudo mv ${HOSTNAME}.kubeconfig /var/lib/kubelet/kubeconfig
+  sudo mv ${WORKERNAME}-key.pem ${WORKERNAME}.pem /var/lib/kubelet/
+  sudo mv ${WORKERNAME}.kubeconfig /var/lib/kubelet/kubeconfig
   sudo mv ca.pem /var/lib/kubernetes/
 }
 ```
@@ -196,8 +209,8 @@ clusterDNS:
 podCIDR: "${POD_CIDR}"
 resolvConf: "/run/systemd/resolve/resolv.conf"
 runtimeRequestTimeout: "15m"
-tlsCertFile: "/var/lib/kubelet/${HOSTNAME}.pem"
-tlsPrivateKeyFile: "/var/lib/kubelet/${HOSTNAME}-key.pem"
+tlsCertFile: "/var/lib/kubelet/${WORKERNAME}.pem"
+tlsPrivateKeyFile: "/var/lib/kubelet/${WORKERNAME}-key.pem"
 EOF
 ```
 
@@ -288,8 +301,13 @@ EOF
 List the registered Kubernetes nodes:
 
 ```
-gcloud compute ssh controller-0 \
-  --command "kubectl get nodes --kubeconfig admin.kubeconfig"
+external_ip=$(aws ec2 describe-instances \
+    --filters "Name=tag:Name,Values=controller-0" \
+    --output text --query 'Reservations[].Instances[].PublicIpAddress')
+
+ssh -i kubernetes.id_rsa ubuntu@${external_ip}
+
+kubectl get nodes --kubeconfig admin.kubeconfig
 ```
 
 > output

@@ -16,13 +16,11 @@ kubectl create secret generic kubernetes-the-hard-way \
 Print a hexdump of the `kubernetes-the-hard-way` secret stored in etcd:
 
 ```
-gcloud compute ssh controller-0 \
-  --command "sudo ETCDCTL_API=3 etcdctl get \
-  --endpoints=https://127.0.0.1:2379 \
-  --cacert=/etc/etcd/ca.pem \
-  --cert=/etc/etcd/kubernetes.pem \
-  --key=/etc/etcd/kubernetes-key.pem\
-  /registry/secrets/default/kubernetes-the-hard-way | hexdump -C"
+external_ip=$(aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=controller-0" \
+  --output text --query 'Reservations[].Instances[].PublicIpAddress')
+
+ssh -i kubernetes.id_rsa ubuntu@${external_ip}
 ```
 
 > output
@@ -177,16 +175,21 @@ NODE_PORT=$(kubectl get svc nginx \
 Create a firewall rule that allows remote access to the `nginx` node port:
 
 ```
-gcloud compute firewall-rules create kubernetes-the-hard-way-allow-nginx-service \
-  --allow=tcp:${NODE_PORT} \
-  --network kubernetes-the-hard-way
+aws ec2 authorize-security-group-ingress \
+  --group-id ${SECURITY_GROUP_ID} \
+  --protocol tcp \
+  --port ${NODE_PORT} \
+  --cidr 0.0.0.0/0
 ```
 
 Retrieve the external IP address of a worker instance:
 
 ```
-EXTERNAL_IP=$(gcloud compute instances describe worker-0 \
-  --format 'value(networkInterfaces[0].accessConfigs[0].natIP)')
+INSTANCE_NAME=$(kubectl get pod $POD_NAME --output=jsonpath='{.spec.nodeName}')
+
+EXTERNAL_IP=$(aws ec2 describe-instances \
+    --filters "Name=network-interface.private-dns-name,Values=${INSTANCE_NAME}.${AWS_REGION}.compute.internal" \
+    --output text --query 'Reservations[].Instances[].PublicIpAddress')
 ```
 
 Make an HTTP request using the external IP address and the `nginx` node port:
@@ -251,12 +254,15 @@ Get the node name where the `untrusted` pod is running:
 
 ```
 INSTANCE_NAME=$(kubectl get pod untrusted --output=jsonpath='{.spec.nodeName}')
+INSTANCE_IP=$(aws ec2 describe-instances \
+    --filters "Name=network-interface.private-dns-name,Values=${INSTANCE_NAME}.${AWS_REGION}.compute.internal" \
+    --output text --query 'Reservations[].Instances[].PublicIpAddress')
 ```
 
 SSH into the worker node:
 
 ```
-gcloud compute ssh ${INSTANCE_NAME}
+ssh -i kubernetes.id_rsa ubuntu@${INSTANCE_IP}
 ```
 
 List the containers running under gVisor:
