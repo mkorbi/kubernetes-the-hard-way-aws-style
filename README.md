@@ -1,6 +1,6 @@
 # Kubernetes The Hard Way AWS Style
 
-We just adjusted this guide to be used on AWS. The true work was done by Kelsey Hightower and all other contributors.
+We just adjusted this guide to be used on Amazon Web Services (AWS). The true work was done by Kelsey Hightower and all other contributors.
 
 This tutorial walks you through setting up Kubernetes the hard way. This guide is not for people looking for a fully automated command to bring up a Kubernetes cluster. If that's you then check out the [Getting Started Guides](http://kubernetes.io/docs/getting-started-guides/).
 
@@ -23,6 +23,11 @@ Kubernetes The Hard Way guides you through bootstrapping a highly available Kube
 * [etcd](https://github.com/coreos/etcd) v3.3.9
 * [CoreDNS](https://github.com/coredns/coredns) v1.2.2
 
+# ToDo
+[ ] HA/multi Subnet setup
+[ ] Small Arch Diagram
+[ ] Explenation how to get started with AWS
+  
 ## Labs
 
 This tutorial assumes you have access to the [Amazon Web Services](https://aws.amazon.com/). While AWS is used for basic infrastructure requirements the lessons learned in this tutorial can be applied to other platforms.

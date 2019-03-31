@@ -41,12 +41,12 @@ aws ec2 create-tags --resources ${INTERNET_GATEWAY_ID} --tags Key=Name,Value=k8s
 ```
 And attach the internet gateway to your VPC
 ```
-aws ec2 attach-internet-gateway --vpc-id ${VPC_ID}--internet-gateway-id ${INTERNET_GATEWAY_ID}
+aws ec2 attach-internet-gateway --vpc-id ${VPC_ID} --internet-gateway-id ${INTERNET_GATEWAY_ID}
 ```
 
 ### Security Groups
 To protect your instances and network at least a little, we will create a Security Group (sg).
-
+```
 SECURITY_GROUP_ID=$(aws ec2 create-security-group \
   --group-name k8s \
   --description "Kubernetes security group" \
@@ -59,13 +59,13 @@ aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --proto
 aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --protocol tcp --port 6443 --cidr 0.0.0.0/0
 aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --protocol tcp --port 443 --cidr 0.0.0.0/0
 aws ec2 authorize-security-group-ingress --group-id ${SECURITY_GROUP_ID} --protocol icmp --port -1 --cidr 0.0.0.0/0
-
+```
 ### Route Tables
 
 Create a route tables that allows outbound communication across all protocols:
 ```
 ROUTE_TABLE_ID=$(aws ec2 create-route-table --vpc-id ${VPC_ID} --output text --query 'RouteTable.RouteTableId')
-aws ec2 create-route --route-table-id <your-rtb-id> --destination-cidr-block 0.0.0.0/0 --gateway-id <your-igw-id>
+aws ec2 create-route --route-table-id ${ROUTE_TABLE_ID} --destination-cidr-block 0.0.0.0/0 --gateway-id ${INTERNET_GATEWAY_ID}
 aws ec2 create-tags --resources ${ROUTE_TABLE_ID} --tags Key=Name,Value=kubernetes
 ```
 To make this working we need now to get our subnets and attach them to the route table. Also we will allow all outbound traffic.
@@ -118,7 +118,7 @@ Create three compute instances which will host the Kubernetes control plane:
 > The AMI ID depends on your region. You can find the right AMI at [ubuntu.com](https://cloud-images.ubuntu.com/locator/ec2/). We use here an AMI for eu-central-1 aka Frankfurt.
 
 ```
-${IMAGE_ID}=ami-0d3d3732ee4ccceff
+IMAGE_ID=ami-0d3d3732ee4ccceff
 ```
 We will use here t2.micros, which is in the free tier inclueded. However there can be still some costs, so don't forget to tidy up later.
 
@@ -157,7 +157,7 @@ for i in 0 1 2; do
     --associate-public-ip-address \
     --image-id ${IMAGE_ID} \
     --count 1 \
-    --key-name k8s \
+    --key-name K8sKeys \
     --security-group-ids ${SECURITY_GROUP_ID} \
     --instance-type t2.micro \
     --private-ip-address 10.240.0.2${i} \
@@ -179,11 +179,8 @@ List the compute instances in your default compute zone:
 aws ec2 describe-instances --filters "Name=tag:Name,Values=worker-0,worker-1,worker-2,controller-0,controller-1,controller-2"
 ```
 
-> output
+> The output will be quite long, fly over it, you will see a lot of information and if you look for the instance names you also will find them
 
-```
-
-```
 
 
 ### Important Note
